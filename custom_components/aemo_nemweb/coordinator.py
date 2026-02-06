@@ -287,10 +287,10 @@ class AEMOCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     
                     region_data_prices = dispatch_prices.get(self.region, {})
                     region_data_demand = dispatch_demand.get(self.region, {})
-                    if region_data:
+                    if region_data_prices:
                         data["realtime_demand"] = region_data_demand
                         data["realtime_price"] = region_data_prices
-                        timestamp = region_data.get("timestamp")
+                        timestamp = region_data_prices.get("timestamp")
                         data["last_update"] = timestamp
                         
                         # Update period boundary
