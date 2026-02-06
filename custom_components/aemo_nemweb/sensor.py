@@ -394,9 +394,9 @@ class AEMORealtimeDemandSensor(AEMOBaseSensor):
 
     _attr_native_unit_of_measurement = "MW"
     _attr_device_class = SensorDeviceClass.POWER
-    _attr_state_class = SensorStateClass.MEASUREMENT  # FIXED: Added for proper statistics
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:lightning-bolt"
-    _attr_suggested_display_precision = 2  # FIXED: Show 4 decimal places
+    _attr_suggested_display_precision = 2
 
     def __init__(
         self,
@@ -417,12 +417,10 @@ class AEMORealtimeDemandSensor(AEMOBaseSensor):
     def native_value(self) -> float | None:
         """Return the current real-time demand in MW.
         
-        FIXED: Normalizes tiny values to prevent NaN/scientific notation display.
         """
         if not self.coordinator.data:
             return None
 
-        # Try DISPATCH data first (fastest updates)
         realtime_data = self.coordinator.data.get("realtime_demand")
         if realtime_data:
             demand = realtime_data.get("demand_mw")
@@ -447,5 +445,5 @@ class AEMORealtimeDemandSensor(AEMOBaseSensor):
             "demand_mw": realtime_data.get("demand_mw"),
             "timestamp": self._convert_to_iso_timestamp(timestamp),
             "region": self._region,
-            "source": "DISPATCH" if self.coordinator._dispatch_available else "P5MIN",
+            "source": "DISPATCH" if self.coordinator._dispatch_available else "Waiting",
         }
