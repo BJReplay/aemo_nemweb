@@ -424,7 +424,7 @@ class AEMORealtimeDemandSensor(AEMOBaseSensor):
         realtime_data = self.coordinator.data.get("realtime_demand")
         if realtime_data:
             demand = realtime_data.get("demand_mw")
-            return self._normalize_demand(demand)
+            return self._normalize_price(demand)
         
         return None
 
