@@ -39,7 +39,7 @@ class AEMOClient:
         # For spike detection
         self._price_history: list[float] = []  # Last 12 prices (1 hour)
 
-    async def get_dispatch_price_with_file(self) -> tuple[dict[str, dict[str, Any]], str]:
+    async def get_dispatch_price_with_file(self) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str]:
         """Fetch real-time dispatch price (updated every ~2-3 minutes).
         
         This is faster than P5MIN files and gives near real-time prices.
@@ -101,16 +101,17 @@ class AEMOClient:
                     return {}, ""
                 content = await response.read()
 
-            prices = self._parse_dispatch_zip(content)
+            prices = self._parse_dispatch_zip_prices(content)
             self._dispatch_cache = {latest_file: prices}
+            demand = self._parse_dispatch_zip_demand(content)
             
-            return prices, latest_file
+            return prices, demand, latest_file
 
         except Exception as e:
             _LOGGER.debug("Error fetching DISPATCH (expected if files not available): %s", e)
             return {}, ""
 
-    def _parse_dispatch_zip(self, content: bytes) -> dict[str, dict[str, Any]]:
+    def _parse_dispatch_zip_prices(self, content: bytes) -> dict[str, dict[str, Any]]:
         """Parse DispatchIS ZIP for current regional prices.
         
         DispatchIS files contain DISPATCH.REGIONSUM tables with regional price data.
@@ -210,6 +211,104 @@ class AEMOClient:
             _LOGGER.error("Error parsing DISPATCH ZIP: %s", e, exc_info=True)
             return {}
 
+    def _parse_dispatch_zip_demand(self, content: bytes) -> dict[str, dict[str, Any]]:
+        """Parse DispatchIS ZIP for current regional demand.
+        
+        DispatchIS files contain DISPATCH.REGIONSUM tables with regional demand data.
+        """
+        demand = {}
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                for filename in zf.namelist():
+                    if filename.upper().endswith('.CSV'):
+                        with zf.open(filename) as f:
+                            csv_content = f.read().decode("utf-8")
+                            reader = csv.reader(io.StringIO(csv_content))
+
+                            # Track if we found a header to understand column positions
+                            header_cols = {}
+                            
+                            for row in reader:
+                                if not row or len(row) < 8:
+                                    continue
+                                
+                                # Check for header row - be more flexible in detection
+                                if row[0] == "C":
+                                    # Check if this row contains REGIONSUM-related columns
+                                    row_str = ",".join(row).upper()
+                                    if "REGIONSUM" in row_str or ("REGIONID" in row_str and ("RRP" in row_str or "PRICE" in row_str)):
+                                        _LOGGER.warning("DISPATCH HEADER ROW: %s", row[:20])  # First 20 columns
+                                        # Parse header to find column positions
+                                        for i, col in enumerate(row):
+                                            col_upper = col.strip().strip('"').upper()
+                                            if col_upper == "REGIONID":
+                                                header_cols["regionid"] = i
+                                            elif col_upper == "RRP":
+                                                header_cols["rrp"] = i
+                                            elif col_upper in ("PRICE", "CLEAREDMW"):  # Try other names
+                                                if "rrp" not in header_cols:
+                                                    header_cols["rrp"] = i
+                                            elif col_upper in ("SETTLEMENTDATE", "DATETIME", "PERIODID"):
+                                                header_cols["datetime"] = i
+                                        _LOGGER.warning("Found REGIONSUM header, columns: regionid=%s, rrp=%s, datetime=%s",
+                                                    header_cols.get("regionid"), header_cols.get("rrp"), header_cols.get("datetime"))
+                                        continue
+
+                                # Skip non-data rows
+                                if row[0] in ('I', 'C'):
+                                    continue
+
+                                # Look for DISPATCH.REGIONSUM or similar data rows
+                                if row[0] == "D" and len(row) > 2:
+                                    table_name = f"{row[1]}.{row[2]}" if len(row) > 2 else ""
+                                    
+                                    # Log all table names we see for debugging (only once per table)
+                                    if table_name not in getattr(self, '_seen_dispatch_tables', set()):
+                                        if not hasattr(self, '_seen_dispatch_tables'):
+                                            self._seen_dispatch_tables = set()
+                                        self._seen_dispatch_tables.add(table_name)
+                                        _LOGGER.info("Found DISPATCH table: %s (columns: %d)", table_name, len(row))
+                                    
+                                    # Look for DISPATCH.PRICE table (has RRP column)
+                                    if table_name.upper() == "DISPATCH.REGIONSUM":
+                                        try:
+                                            # DISPATCH.REGIONSUM format:
+                                            # D, DISPATCH, PRICE, 9, SETTLEMENTDATE, RUNNO, REGIONID, DISPATCHINTERVAL, INTERVENTION, TOTALDEMAND, ...
+                                            # Indices: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
+                                            
+                                            if len(row) > 9:
+                                                regionid = row[6].strip().strip('"')
+                                                
+                                                if regionid in NEM_REGIONS:
+                                                    settlementdate = row[4].strip().strip('"')
+                                                    intervention = int(row[8].strip()) if row[8].strip().isdigit() else 0
+                                                    demand = float(row[9].strip())
+                                                    
+                                                    # Only use intervention=0 (normal market prices)
+                                                    if intervention == 0:
+                                                        _LOGGER.info(
+                                                            "DISPATCH.TOTALDEMAND: %s at %s = $%.2f/MW (intervention=%d)",
+                                                            regionid, settlementdate, demand, intervention
+                                                        )
+                                                        
+                                                        demand[regionid] = {
+                                                            "demand_mw": demand,
+                                                            "timestamp": settlementdate,
+                                                        }
+                                        except (ValueError, IndexError) as e:
+                                            _LOGGER.debug("Parse error in DISPATCH.REGIONSUM row: %s", e)
+                                            continue
+
+            if not prices:
+                _LOGGER.warning("No demand extracted from DISPATCH file. Header cols: %s", header_cols)
+            
+            return demand
+
+        except Exception as e:
+            _LOGGER.error("Error parsing DISPATCH ZIP: %s", e, exc_info=True)
+            return {}
+    
     async def get_current_prices_with_file(self) -> tuple[dict[str, dict[str, Any]], str]:
         """Fetch ACTUAL current prices from P5MIN (most recent completed period)."""
         try:
